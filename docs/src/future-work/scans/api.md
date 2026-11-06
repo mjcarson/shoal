@@ -37,7 +37,7 @@ let scan = MovieScan::new()
     .filter(released)
     .projection::<MovieSummary>();
 let mut rows = client.scan(scan).level(ReadLevel::One).start().await?;
-// hand each summary on as its chunk arrives, in no order across tablets
+// hand each summary on as its page arrives, whole and validated, in no order across tablets
 while let Some(summary) = rows.next().await {
     index.add(summary?);
 }
@@ -48,6 +48,7 @@ while let Some(summary) = rows.next().await {
 | `.level(ReadLevel)` | `One` or `Quorum`, the table's read policy unless named ([C6](../../distributed/reads.md)) |
 | `.page(rows, bytes, work)` | A page's bounds ([W4](cursor-and-pages.md#bounds-and-short-pages)) |
 | `.streams_per_shard(n)` | Up to two unless named; a shard's admission has the last word ([W6](distribution.md#streams)) |
+| `.partitions()` | An unfiltered, unprojected scan answered in partitions as the walk hands them out, the client decoding them into the same rows: the shard spends less and the client more, and a filter or a projection refuses it by name ([W4](cursor-and-pages.md#the-body-rows-or-partitions-on-request), [Q35](contract.md#q35-what-a-scans-answer-carries-2026-11-06)) |
 | `.split(n)` | The scan cut into `n` parts over disjoint tablet ranges, each started by a worker of its own |
 | `.tablets(set)` | One part, over a tablet range a caller names |
 | `.start()` | Begins: rows with `.next()`, or whole pages with `.next_page()` |

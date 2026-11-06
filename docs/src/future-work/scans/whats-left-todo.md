@@ -52,7 +52,10 @@ scan's: a twin of the arm with its scan paced to almost nothing rose as far
 ([Resolved #359](../../appendix/resolved/the-cells-own-climb.md)). **M23 closed on 2026-11-04**, decided with the user
 ([the decisions](m23-exit.md#decided-with-the-user-2026-11-04)): the read clause held against that
 twin, and the step clause met with its remainders apart, each after M23. Every box of
-[Finishing M23](#finishing-m23) is green. M24 is next.
+[Finishing M23](#finishing-m23) is green. M24 is next. Since 2026-11-06 Q35 is settled with the user
+([its record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)): rows encoded on the shard by
+default, and partitions for an unfiltered, unprojected scan that asks, which the box *Whole partitions in
+answers* builds with M24. Item 365, found on the way, is filed under *Found on the way, any time*.
 
 **How to read them.**
 
@@ -359,6 +362,7 @@ flowchart LR
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
+        I365["Item 365: a projection still<br>needs its partition key"]
         I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
@@ -610,7 +614,7 @@ flowchart TB
         O154["O154 A capture's view allocates<br>nothing on the loop (optional)"]:::optional
         O155["O155 Two scan reads a device<br>collapse a scan (optional)"]:::optional
     end
-    Q35["Q35 What a scan's<br>answer carries"]
+    Q35["✅ Q35 What a scan's<br>answer carries"]:::done
     Q36["Q36 The cursor<br>and the frames"]
     Whole["Whole partitions<br>in answers"]
     X19["X19 The edges"]
@@ -651,6 +655,7 @@ flowchart TB
         I360["✅ Item 360: M23's exit row<br>names no function"]:::done
         I361["✅ Item 361: a missing archive<br>fails every archive pass"]:::done
         I363["Item 363: a copy that lost<br>an archive is not repaired"]
+        I365["Item 365: a projection still<br>needs its partition key"]
         I364["✅ Item 364: a dropped client's<br>last connect logs an ERROR"]:::done
         I362["✅ Item 362: a bundle its access<br>check refuses ended its node"]:::done
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done

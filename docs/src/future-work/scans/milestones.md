@@ -35,7 +35,7 @@ can reach is passed without [W7](isolation.md#the-budget)'s budget measured besi
 | Before M22 | ✅ The contract agreed, 2026-10-29 | P20–P26 | — |
 | M22 | ✅ The harness and the facts: the bench's scan, the fixture's oracle, the baseline, delivered 2026-10-30 (F122) | — | The bench's scan kind and `scan` event |
 | M23 | ✅ The walk rebuilt for load, the drivers moved onto it, judged by the budget and, since W42, by a scan's own rate and cost, delivered 2026-11-04 (F123 to F130) | Q33, Q34, Q37's default, Q62 | The scan class, the budget, device pacing, an admission class; one operation a record read, merges written in key order |
-| M24 | Scans on one node: the frames, the client, SHQL, the grant | Q35, Q36 | — |
+| M24 | Scans on one node: the frames, the client, SHQL, the grant | ✅ Q35 (settled 2026-11-06), Q36 | — |
 | M25 | Scans across a cluster: copies, floors, refusals, activation | Q38, Q39 | — |
 | M26 | Listing a bucket's objects, unordered | What a listing reads (X19) | — |
 | M27 | Ordered scans by declared order | Q40 | — |
@@ -212,11 +212,15 @@ design.
 
 ### M24. Scans on one node
 
-**Closed before it.** Q35, what an answer carries; Q36, the cursor and the frames.
+**Closed before it.** Q35, what an answer carries, ✅ settled 2026-11-06 with the user
+([the record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)); Q36, the cursor and the frames.
 
 **Delivers.**
 - `ScanPage` and `ScanAnswer`, `CLIENT_CAP_SCANS`, refusals by name, `Cancel` of a page
   ([W4](cursor-and-pages.md)).
+- An answer's two bodies: rows encoded on the shard by default, and partitions for an unfiltered,
+  unprojected scan that asks, under `PARTITION_LAYOUT`; each page's rows handed on once its answer is
+  whole and validated ([W4](cursor-and-pages.md#the-body-rows-or-partitions-on-request), Q35).
 - The client's driver against one node: streams by hosting shard, resume tokens, `split(n)`
   ([W6](distribution.md), [W10](api.md#the-client)).
 - `MovieScan` generated beside each get, with its filter, limit and projection.
@@ -343,7 +347,8 @@ after M23's exit, are optional and not planned.
 
 - **Whole partitions in answers** for an unfiltered scan, the client decoding them
   ([Q35](contract.md#questions-to-answer)); [X17](page-rebuilt.md#rows-encoded-on-the-shard-against-walked-partitions)
-  moved it forward.
+  moved it forward. Its shape is settled since 2026-11-06 ([Q35's record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)):
+  an opt-in, `.partitions()`, refused with a filter or a projection, under a layout version of its own.
 
 **After M24**, once a client scans one node:
 

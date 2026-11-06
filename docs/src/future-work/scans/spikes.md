@@ -171,7 +171,7 @@ timeout. Recorded on W13 as [evidence for Q33, Q34 and Q37](contract.md#x20-run-
 | Gate | Decided first |
 | --- | --- |
 | M23 | Q33, Q34, ~~and~~ Q37's default and Q62, by X16, X17, X18 and X37 |
-| M24 | Q35 and Q36, by X17, X19 and design |
+| M24 | ~~Q35 and~~ Q36, by ~~X17,~~ X19 and design; Q35 settled 2026-11-06 by X17 and design, with the user ([the record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)) |
 | M25 | Q38 by design, and Q39 with the user |
 | M26 | What a listing reads, by X19 |
 | M27 | Q40, by X21 |

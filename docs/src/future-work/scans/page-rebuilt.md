@@ -300,7 +300,8 @@ it is the ring's submission and completion and the kernel's path to them.
   folded where it is, is M23's work, not optional.
 - **Q35's opt-in moves forward**: an unfiltered scan should be able to ask for partitions as they
   lie, since rows encoded on the shard cost the shard more than they spare its clients; a filtered or
-  projected scan encodes rows, as W4 has it.
+  projected scan encodes rows, as W4 has it. Taken 2026-11-06 with the user, rows staying the default
+  ([Q35's record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)).
 - **Saved positions stay optional**, priced only where tablets take many pages.
 
 ## The second half: the plan step, encodes in steps, and rows

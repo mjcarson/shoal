@@ -594,6 +594,30 @@ the leader's own copy, which would have to hand its lead on first. Write the tes
 cluster at a factor of three, one member's archive file removed, and a read of its rows through that
 member that must be answered from the repaired copy within a bound.
 
+### 365. A projection must still carry its table's partition key, which two pages say it need not
+
+`shoal-derive/src/projections.rs` (the `partition_fields.is_empty()` panic, and the
+`assert_partition_key` assertion it emits); `docs/src/features/projections.md`, *A projection carries
+its table's partition key*; `docs/src/api/derive-macros.md`, the projection section
+
+**Medium, a defect of the derive or of its pages: a projection that names no `#[shoal(partition)]`
+field does not compile, while F2's page and the derive reference say it does.** F2's page says the
+requirement and its compile-time assertion are "both gone" since [F27](../features/grouped-responses.md),
+and the derive reference that "a projection of a title alone now compiles". The derive still panics
+"A projection has to carry its tables partition key" when no field is marked, and still emits the
+assertion that the projection's `PartitionKey` is its row's. The derive reference's own limitations
+list says the opposite of its projection section: "A projection has to name its table's partition key".
+Nothing found on the way still needs it: `order_by_partitions` takes the query's partition hashes and
+no bound on the row (`shoal-proto/src/shared/responses.rs`), which is what F27 changed.
+
+**Established by reading the source** (2026-11-06), while Q35 settled what a scan's answer carries,
+whose projections are a get's. Not reproduced: no test compiles a projection without its partition key.
+
+**Fix direction:** write the test first, a projection of a title alone in a schema of its own that must
+compile and answer a get, and keep its failure. Then drop the panic and the assertion if nothing still
+needs a projection's partition key, checking every caller of `PartitionKeySupport` on a projection, or
+otherwise correct both pages to say the requirement stands and why.
+
 ### 221. A strong exists takes no read barrier, and is never refused as stale or steered off an installing copy
 
 `shoal-core/src/server/shard/reads.rs`, `await_read_barrier`; `shoal-core/src/server/shard/migrate.rs`,

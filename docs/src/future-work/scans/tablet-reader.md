@@ -228,7 +228,9 @@ change could run them on an executor of its own ([Q37](contract.md#questions-to-
 ✅ The folds built as [F127](../../features/folds-in-steps.md) (2026-10-31), M23's fifth step: a planned
 partition that needs a fold is folded over its archive in archived form, a step of the scan queue at a
 time, and handed out in pieces of at most 64 KiB and a row. Filters, projections and rows encoded into
-chunks are a client's, at M24, once [Q35](contract.md#questions-to-answer) settles what an answer carries.
+chunks are a client's, at M24, ~~once [Q35](contract.md#questions-to-answer) settles what an answer carries~~
+as [Q35](contract.md#q35-what-a-scans-answer-carries-2026-11-06) settled on 2026-11-06: rows by default,
+and the walk's partitions as it hands them out for an unfiltered, unprojected scan that asks.
 
 ### 6. Check and answer, on the loop
 

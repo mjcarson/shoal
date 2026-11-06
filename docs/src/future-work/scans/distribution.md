@@ -205,7 +205,9 @@ the time, and voters always exist.
 
 Two streams a hosting shard, each a connection's worth of pages; a resume token in the client; one
 barrier a group at `Quorum`; a refused tablet's page asked twice. The client's cpu decodes every
-chunk, and with a spread, merges.
+chunk, several times as much a row for a scan that asked for partitions
+([W4](cursor-and-pages.md#the-body-rows-or-partitions-on-request)), and with a spread, merges. It holds
+one page's answer a stream until the answer validates.
 
 ## What it breaks
 

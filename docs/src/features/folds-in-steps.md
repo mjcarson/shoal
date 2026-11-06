@@ -45,8 +45,11 @@ so the commands after it run while its reads are held (through `ShoalPool::ask_w
 `HOLD_WALK_READS`, F116's hold of a class's reads before they start.
 
 What W5's fifth step also names, filters, projections and rows encoded into chunks, is a client's:
-in M23 a page answers an admin walk's keys and counts, and what a client's answer carries is
-[Q35](../future-work/scans/contract.md#questions-to-answer)'s to settle before M24.
+in M23 a page answers an admin walk's keys and counts, and what a client's answer carries ~~is
+[Q35](../future-work/scans/contract.md#questions-to-answer)'s to settle before M24~~ was settled by
+[Q35](../future-work/scans/contract.md#q35-what-a-scans-answer-carries-2026-11-06) on 2026-11-06: rows
+encoded on the shard by default, and these pieces as they are for an unfiltered, unprojected scan that
+asks, under a layout version of their own.
 
 ## Design choices
 

@@ -69,6 +69,7 @@ proposal for [M24](milestones.md#m24-scans-on-one-node) to fix; none is on a wir
 | Open cursor | The tablet the last page stopped in, the last key handed out, and a reserved suffix for a sort key, so a later change can split one huge sorted partition across pages without a new frame |
 | Floors | For each group the tablets belong to, the highest boundary the scan has seen in it, and a bit asking for a barrier |
 | Tail | A projection's id and a filter, in the table's own types (the shapes a get carries, [Query Execution](../../tables/query-execution.md)) |
+| Body | `Rows`, or `Partitions` for an unfiltered, unprojected scan of a table, and refused for anything else ([the body](#the-body-rows-or-partitions-on-request)) |
 
 ### The answer: `ScanAnswer`
 
@@ -82,7 +83,7 @@ Message type 33, server to client, under the page's id.
 | Refused | The tablets this page would not read, each with its code: `StaleTopology`, `Unavailable`, `Quarantined` |
 | Why it ended | Rows, answer bytes, work, the end of its tablets, or its time on the shard |
 | Figures | Partitions and rows read and handed out, bytes read, from memory and from archives |
-| Body | Rows or projections in rkyv chunks of at most 64 KiB, each aligned on its own and carrying [F27](../../features/grouped-responses.md)'s row groups, so the client can hand rows on as each chunk arrives; in `Data` frames of at most 256 KiB under kTLS ([W7](isolation.md#network)) |
+| Body | Rows or projections in rkyv chunks of at most 64 KiB, each aligned on its own and carrying [F27](../../features/grouped-responses.md)'s row groups, ~~so the client can hand rows on as each chunk arrives~~ handed on once the page's answer is whole and validated; or, for an unfiltered, unprojected scan that asked, partitions as the walk hands them out, under their layout's version ([below](#the-body-rows-or-partitions-on-request)); in `Data` frames of at most 256 KiB under kTLS ([W7](isolation.md#network)) |
 
 A request the shard refuses whole, a scan not granted, a table not committed, a bound past its most,
 is answered by one `Error` frame, as an object operation is.
@@ -92,7 +93,50 @@ is answered by one `Error` frame, as an object operation is.
 shard 1.3 to 2.9 times what decoding the partitions as they lie costs a client, the most for small
 rows. So an unfiltered scan's opt-in to partitions as they lie, which
 [W11](tradeoffs.md) weighs against a server layout on the wire, moves forward to M24
-([Q35](contract.md#questions-to-answer)).
+([Q35](contract.md#questions-to-answer)). Q35 is settled since 2026-11-06, with the user
+([the record](contract.md#q35-what-a-scans-answer-carries-2026-11-06)): rows by default, and partitions
+for a scan that asks, as the next section has it.
+
+### The body: rows, or partitions on request
+
+**Rows, by default.** Every scan is answered in rows encoded on the shard: its filter applied, then
+its projection, where the rows are, and never a deleted row. Rows go in F27's shape, `GetRows<P>`, the
+rows and the groups of the partitions they came from, as rkyv chunks of at most 64 KiB and one row.
+Each chunk is a root of its own, aligned to 16, and drawn from the scan budget before it is allocated.
+A resident row is written from the partition holding it (`RowRef`) and an archived one field by field
+from its archive (`Rearchive`), exactly as a get's are, so a scan adds no encoder of its own.
+
+**Partitions, when an unfiltered, unprojected scan asks** (`.partitions()`, a body kind in
+`ScanPage`). The answer carries the walk's partitions as the walk hands them out: the table's archived
+partition each, aligned to 16, holding no tombstone, a sorted one in the pieces of at most 64 KiB and a
+row that its fold makes ([F127](../../features/folds-in-steps.md)). The walk has already validated
+each on the shard, so the shard pays nothing past its walk. The client validates each piece and hands
+the caller the same rows a scan in rows would, paying the decode instead: 259 to 298 ns a row for
+`Big` against 39 to 80 in rows, by X17. A request for partitions with a filter or a projection, of a
+listing, or of a generated table is refused whole, by name.
+
+**The layout has a version of its own.** No fingerprint covers a partition's container, and none can
+start to without moving every table's. So an answer in partitions names `PARTITION_LAYOUT`, a version
+moved by hand and held by a golden test of canonical partitions' archived bytes, as `OBJECT_ROWS_LAYOUT`
+is for a bucket's rows. A client reads the layout through types of `shoal-proto`, never the engine's;
+one that does not know a layout refuses it by name, reads none of it, and may ask again in rows.
+
+**Nothing is read before it is validated, and nothing is handed on before its page is whole.** The
+client checks a chunk's declared length against the page's answer bytes and its kind's bound before it
+allocates, validates the chunk with bytecheck in a buffer aligned to 16, and hands the page's rows on
+only once every chunk of it has validated. A shard sends a page only once the page is read and its copy
+checked, and a stream's cursor moves only at the page's end. So a page whose connection was cut is
+asked again from where it began, and hands out nothing twice. A chunk that does not validate hands out
+no row of its page and ends the scan by name, which its token resumes.
+
+| | Rows | Partitions |
+| --- | --- | --- |
+| Asked for | By default | `.partitions()`, an unfiltered, unprojected scan of a table |
+| Filter and projection | Applied on the shard | Refused |
+| The shard's cost past its walk | 80 to 280 ns a row at most (X17), less through `Rearchive` and a projection | None |
+| The client's cost a row (X17) | 29 to 80 ns | 68 to 298 ns |
+| On the wire | `GetRows<P>`, the projection's fields | Every field, and the partition's own: its key, its size and a sorted one's `check_disk` |
+| Its layout | The row's, which the table's fingerprint covers | `PARTITION_LAYOUT`'s, pinned by a golden test |
 
 ### Bounds, and short pages
 
@@ -216,10 +260,31 @@ worth it.
 **The walk's admin read for clients.** JSON, keys and counts, one tablet, an admin's grant: built
 for an operator's check, and F87 says so.
 
+**Partitions for every unfiltered scan, unasked** ([Q35](contract.md#q35-what-a-scans-answer-carries-2026-11-06)).
+The shard would always do the least, and every client would pay several times its decode, 68 to 298 ns
+a row against 29 to 80, whether or not it has the cores. Rejected with the user: the default costs a
+Zen1 shard under 3% of a walked partition for `Big`'s rows, and a caller who would rather pay it asks.
+
+**The partition layout mixed into every table's fingerprint.** It would pin the layout as well as a
+version does, and move every table's fingerprint the day it lands: every archive, snapshot and backup
+is judged by one ([F93](../../features/operations-and-the-real-cluster.md)). A version in the answer
+moves nothing that exists.
+
+**A filter or a projection applied to partitions by the client.** The client would read every row the
+filter drops and every field the projection leaves out over the wire, which is what a filter and a
+projection are for. A filtered or projected scan is answered in rows.
+
+**Rows handed on as each chunk arrives.** A chunk sooner, but a page whose connection is cut part way
+is asked again from where it began, so the rows of its first chunks would be handed out twice, against
+[P20](contract.md#the-contract). It needs each chunk to carry the last partition it finished, and a
+stream to ask again from there: a later gain for Q36's frames, priced on M24's streams.
+
 ## What it costs
 
 A request and an answer a page a stream, with a head of a few hundred bytes at most; a resume token
-under a kibibyte a scan; one barrier a group at `Quorum`. Nothing a server keeps between pages.
+under a kibibyte a scan; one barrier a group at `Quorum`. Nothing a server keeps between pages. A
+client holds one page's answer a stream until it validates, a bound it sets itself with the page's
+answer bytes; a scan in partitions moves the decode from the shard to it.
 
 ## What it breaks
 
@@ -233,6 +298,14 @@ cluster activates when it is ready. A client that never asks for the bit sees no
 - **The end of a scan is a flag.** No client stops on a short or empty page.
 - **A floor never lowers**, and every page of a group is read at or above it.
 - **A request is idempotent**: the same request again gets a page at or after its floor.
+- **A filter and a projection are applied on the shard or the scan is refused.** Partitions are
+  answered only to an unfiltered, unprojected scan of a table, never to a listing or a generated table.
+- **No byte of an answer is read before it validates**: a declared length checked before anything is
+  allocated, bytecheck before any access, never unchecked.
+- **A page's rows are handed on only once its answer is whole and validated**, so a page asked again
+  hands out nothing twice.
+- **A change to a partition's archived bytes moves `PARTITION_LAYOUT`**, which its golden test fails
+  without; no table fingerprint moves for it.
 
 ## Prerequisites
 
@@ -255,6 +328,12 @@ a page puts on the wire against the rows it hands out are counted in every run (
 | `a_resume_token_resumes_and_is_refused_for_another_table` | M24 | A token resumes where it stopped, and another fingerprint's is refused by name |
 | `a_scan_is_refused_without_the_capability` | M24 | A client that did not ask for bit 5, or a server without streams, never sends or answers a page |
 | `a_cancelled_page_stops_at_its_next_step` | M24 | `Cancel` of a page in flight is answered once and the page reads no further |
+| `an_unfiltered_scan_in_partitions_hands_out_the_rows_a_scan_in_rows_does` | M24 | Both bodies hand the caller the same rows, of sorted partitions in pieces, resident, overlaid and archived alike |
+| `partitions_are_refused_with_a_filter_a_projection_or_a_listing` | M24 | A request for partitions with a filter, a projection, of a listing or a generated table is refused by name and reads nothing |
+| `a_partition_layout_the_client_does_not_know_is_refused_by_name` | M24 | An answer naming another `PARTITION_LAYOUT` is refused whole, no row of it read |
+| `the_partition_layout_is_pinned_by_its_canonical_bytes` | M24 | A change to a partition's archived bytes fails until `PARTITION_LAYOUT` moves, and the engine's partitions read as the client's |
+| `a_chunk_that_does_not_validate_hands_out_no_row_of_its_page` | M24 | A corrupt chunk or a length past its bound ends the scan by name before anything is allocated or handed out |
+| `a_page_cut_off_mid_answer_is_asked_again_and_hands_out_nothing_twice` | M24 | A connection cut between a page's chunks: the page is asked again and every row is handed out once |
 | `a_cluster_answers_no_scan_before_its_activation` | M25 | Below the activated version every page is refused by name |
 
 ## Related
