@@ -25,3 +25,4 @@
 2026-11-06T06:07:50Z hyperion: /var/lib/containers removed, absent before X20
 2026-11-06T06:07:51Z europa: docker rmi x20-client docker.io/scylladb/scylla:2026.3.4, and python:3.12-slim where tagged; build cache pruned
 2026-11-06T06:10:53Z europa: scylladb/scylla:2026.3.4 pulled again and a container of it left by a reading of the image's entrypoint during teardown, not by this script; both removed by hand, the hosts verified again once the m23 side cluster's own run put them back
+2026-11-06T07:24:23Z hyperion: verify found apt, apt-utils, apt-transport-https and libapt-pkg7.0 3.2.0 -> 3.2.1ubuntu0.1 and python3-twisted upgraded at 07:23:58 by the host's own unattended-upgrade, a minute after the m23 side cluster's run gave the timers back; not this run's. europa and titan identical to their snapshots

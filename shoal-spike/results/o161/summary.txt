@@ -1,0 +1,2 @@
+dsync        523 durable writes a second  flushes       8  write p50 1892.4 us p99 2039.8 us p99.9 10682.4 us
+fdatasync   1095 durable writes a second  flushes   21901  write p50   40.2 us p99   63.7 us p99.9   85.5 us  sync p50  839.7 us p99 1384.4 us p99.9 4046.8 us

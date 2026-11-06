@@ -368,7 +368,7 @@ flowchart LR
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
-        O161["O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::optional
+        O161["✅ O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::done
     end
 ```
 
@@ -508,7 +508,8 @@ a second, and a sealed segment, 0.5 ms. It is optional, any time, and wants a me
 [O161](../../appendix/optimizations.md#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do)
 was found by O140's ScyllaDB run with each write synced (2026-11-06): its commit log's writes were made
 durable by FUA writes and its inserts answered at 2.5 ms, where Shoal's WAL flushes each batch. Optional,
-any time, a drive's FUA measured first.
+any time, a drive's FUA measured first. Measured the same day and not taken: on titan's 970 EVO a FUA write
+costs twice a write and a flush, so the WAL keeps its flush. Its box is green.
 
 The work found on the way waits on no gate. ~~Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -651,7 +652,7 @@ flowchart TB
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
-        O161["O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::optional
+        O161["✅ O161 A WAL batch synced by a flush,<br>not a FUA write (optional)"]:::done
     end
     subgraph anytime["Optional, any time"]
         direction LR

@@ -4913,10 +4913,12 @@ O140 was filed with was right for it: a synced write costs the reads beside it. 
 and O159 fixed, is a quarter of ScyllaDB's synced p99 and below its unsynced one, its p999 between the
 two. The clients differ (X20's is Python and adds to ScyllaDB's figures), so the comparison is a guide,
 never a verdict. What it does show is the other side of the same table: ScyllaDB's synced insert is 2.5 ms
-at the p50 where Shoal's is 17.8, and only part of that is Shoal's replication through Raft. ScyllaDB's
-sync is a FUA write; Shoal's is a flush, which on these drives costs 0.9 to 3 ms
-([Resolved #351](resolved/the-cells-fall-is-the-drives.md))
-([O161](#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do)).
+at the p50 where Shoal's is 17.8. It is not the sync itself: ScyllaDB's is a FUA write, which on these
+drives costs twice the write and flush Shoal's WAL makes
+([O161](#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do), measured the same day). Where
+a synced insert's 17.8 ms goes, its members' syncs in series or beside each other among it, is
+[O47](#o47-a-followers-fsync-may-be-waiting-for-the-leaders-rather-than-running-beside-it)'s question,
+not measured here.
 
 ### O141. A walked partition costs a Zen1 host about 73 microseconds of cpu
 
@@ -5385,10 +5387,26 @@ Nothing else moved.
 
 | | |
 | --- | --- |
-| **Rank** | **any time**, optional, **to measure**: what a FUA write costs these drives beside a flush, before the WAL is changed for it. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s ScyllaDB run (2026-11-06) |
+| **Rank** | ~~**any time**, optional, **to measure**: what a FUA write costs these drives beside a flush, before the WAL is changed for it~~ **measured, not taken** (2026-11-06): on the lab's 970 EVOs a FUA write costs twice a write and a flush, so the WAL keeps its `fdatasync`. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s ScyllaDB run (2026-11-06) |
 | **Impact** | Argued, from that run. Shoal's WAL writes a batch with one `write_at` and makes it durable with one `fdatasync` (`shoal-core/src/server/wal/mod.rs`), which on a drive with a volatile cache is a flush, and the lab's 970 EVOs flush in 0.9 ms rested and about 2.8 ms after a minute of synced writes ([Resolved #351](resolved/the-cells-fall-is-the-drives.md)). ScyllaDB opens its commit log `O_DSYNC`, and XFS makes an `O_DSYNC` direct write into a written extent durable by a FUA write when the drive supports one, as both 970 EVOs report (`/sys/block/nvme0n1/queue/fua`): in its synced run the Zen1 hosts' drives completed 13 to 33 flushes in a 65 s round, and its inserts at QUORUM answered at a p50 of 2.5 ms where Shoal's cell's answer at 17.8, most of which is not the flush but is paid on every member's WAL behind each batch |
 | **Difficulty** | M. A FUA write needs nothing of the file's metadata to change: a segment written into its preallocated length only once its extents are written, so each segment is zeroed ahead, as F96's chunk files are written whole before they are named, and opened `O_DSYNC` beside `O_DIRECT`. A drive without FUA makes the kernel flush instead, as today; europa's Optane, write-through, needs neither |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Every WAL byte is written twice, once as zeros ahead and once as a frame, unless segments are recycled already written; a FUA write on a consumer drive may be a flush inside it, which is what the measurement is for |
 | **Benchmark** | fio on titan's 970 EVO first: 4 KiB `O_DSYNC` direct writes into a written file against `write` and `fdatasync`, the flushes counted and each write's latency, rested and after a minute; then the cell alone side against side (`CELL_ONLY`) for its inserts' p50 and p99 and the reads beside them |
+
+**Measured** (2026-11-06) on titan's 970 EVO, its tmdb node stopped for the run
+(`shoal-spike/results/o161-fua.sh`, its output in `shoal-spike/results/o161/`): 4 KiB direct writes at one
+in flight for 20 s into a file written whole first, so no write changes its metadata, made durable two
+ways, the drive's flushes counted around each.
+
+| Made durable by | Durable writes a second | Flushes | Latency, p50 / p99 / p99.9 |
+| --- | --- | --- | --- |
+| `O_DSYNC`, a FUA write | 523 | 8 | 1.89 / 2.04 / 10.7 ms |
+| `write` and `fdatasync`, a flush, as the WAL does | 1,095 | 21,901 | the write 0.040 / 0.064 / 0.086 ms, its sync 0.84 / 1.38 / 4.05 ms |
+
+The drive reports FUA and honours it as the kernel asks, since the FUA writes issued no flush, but a FUA
+write costs it twice what a write and a flush do, rested. The WAL's `fdatasync` is the cheaper of the two
+here, and ScyllaDB's synced insert of 2.5 ms in O140's run is mostly its FUA write. Nothing is taken. A
+drive whose FUA is cheaper than its flush, as an enterprise drive with power-loss protection may be,
+would answer otherwise, and the script runs there unchanged.
