@@ -1,0 +1,1 @@
+side B: 1b7e21cb perf(replication): openraft's queues and Shoal's retry table sized to their load (O158); node 87a6605f02893972; env [MIMALLOC_ALLOW_LARGE_OS_PAGES=0]

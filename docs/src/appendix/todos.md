@@ -3990,3 +3990,16 @@ them by the cell's p99, and its step clause names steps on the loop
 tail moving beside a scan while no loop step passes its bound: `Steps::take` would time the work
 between its offers, restarting at each await of `PendingWalk::finish`, and carry the figures back
 with the page's outcome to be counted on the loop, as F123's counts are.
+
+## A node's huge pages, a deployment's choice
+
+Left out of [O157](optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) (2026-11-06), whose A/B
+kept mimalloc's huge pages as every node's default: without them a node's tails lose, a read beside the
+cell's inserts 1.44 times slower at the p999 at 6 GiB a node. At a memory its floor binds they are most
+of what a node holds past its budget, titan's node 1.62 GiB against 1 GiB with them and 1.0 without, and
+the cell's reads beside its inserts were a quarter faster at the median without them. A small node's
+operator may want that trade. It is an inventory key, false unless named, that renders
+`Environment=MIMALLOC_ALLOW_LARGE_OS_PAGES=0` in the unit beside item 353's `MIMALLOC_PURGE_DELAY`
+(`shoaladm/src/deploy/unit.rs`), with the wizard keeping it. Left out because O157's 1 GiB arm ran two
+side-rounds a side; the trade is worth more rounds at the memories a small node runs at before an
+operator is offered it.

@@ -364,7 +364,7 @@ flowchart LR
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
-        O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
+        O157["✅ O157 A node's heap on transparent<br>huge pages (optional)"]:::done
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
@@ -480,7 +480,10 @@ of writes in the fixture; a probe is now the tick's, at most once a second, on a
 green.
 [O157](../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages) was found by its run
 on europa's loopback cluster: mimalloc madvises its arenas for huge pages, about a quarter of a gibibyte
-of every node's floor. It is optional, any time, and wants a before and after on the lab first.
+of every node's floor. It is optional, any time, and wants a before and after on the lab first. It is
+measured and not taken (2026-11-06): without huge pages a node holds half as much at ready and a tenth less
+loaded, and the cell's tails lose at 6 GiB and at 1 GiB, so every node keeps them; offering them to a
+small node's deployment is on the todos. Its box is green.
 [O158](../../appendix/optimizations.md#o158-what-openraft-holds-of-every-nodes-floor) was found by the
 same run's heap profile: openraft allocates every group's engine queue to 4,096 commands, #191's shape
 again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap. Optional, any time. It is applied
@@ -635,7 +638,7 @@ flowchart TB
         I204["✅ Item 204: the stream budget<br>a shard's, not a node's"]:::done
         O140["O140 A resident read's tail<br>beside inserts (optional)"]:::optional
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
-        O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
+        O157["✅ O157 A node's heap on transparent<br>huge pages (optional)"]:::done
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
         O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
         O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional

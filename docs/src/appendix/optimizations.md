@@ -4864,6 +4864,33 @@ is fair.
 Filed from X20, whose figures for ScyllaDB came from a slower client than Shoal's, driven faster, so
 the gap is if anything wider than it reads.
 
+**Measured** (2026-11-05 and 06), on the `m23` side cluster with the cell alone (`CELL_ONLY`: a cluster
+bootstrapped fresh at 6 GiB a node, the cell's first 100,000 rows preloaded, `rw50` and `read100` at a
+bundle of one, each warmed 100 s past item 351's change of flush and measured 120 s, every member's own
+figures read each second).
+
+- **Which reads.** X16's 7.66 ms was its build's, at 4 GiB a node beside its other tables; by `4933602a`,
+  with items 338, 350, 353 and the rest in, the cell alone read at a p99 of 2.42 ms beside its inserts.
+  Each member's own get p99 was 0.14 ms on europa and 0.45 to 0.49 ms on the Zen1 hosts, so the client's
+  figure was not one member's.
+- **Where on the shard.** A `loop-profile` build ([the observability page](../operations/observability.md#the-loop-profile),
+  `shoal-spike-scan/results/found-o140/`) found a shard's loop idle 97 to 99% of `rw50`: a client's bundle
+  waited 3 to 14 µs at the mean to be taken and a routed query 16 to 48 µs, 64 to 256 µs at the p99. What
+  held it longest were two messages about every six seconds, a compacted segment's checkpoint write,
+  16 ms at the mean on a Zen1 host, and its evictable marking, 4 ms.
+- **The p99 was item 352's.** A shard asked each of its 54 groups' cores in turn whether it ran after
+  every batch it applied. Its fix took the cell's read p99 beside its inserts from 2.42 to 0.75 ms and its
+  inserts a second up 11%, every range disjoint over eight side-rounds
+  ([Resolved #352](resolved/core-probes-off-the-loop.md#evidence)): under ScyllaDB's 1.15 ms with its writes
+  unsynced.
+- **The p999's holds were O159's.** Both became steps of a quarter of a millisecond at most
+  ([O159](#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)),
+  and the read p999 fell to 0.71 of what it was at the median, its ranges overlapping at four side-rounds
+  a side. What holds a shard's loop longest now is its tick and a sealed segment, under a millisecond at
+  the mean ([O160](#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)).
+
+SCYLLA_BATCH_PENDING
+
 ### O141. A walked partition costs a Zen1 host about 73 microseconds of cpu
 
 | | |
@@ -5141,13 +5168,55 @@ baseline decision for its owner to take, and this is the figure it would be take
 
 | | |
 | --- | --- |
-| **Rank** | **any time**, optional. Found by [Resolved #338](resolved/resident-floor-reserve.md) (2026-11-05) |
+| **Rank** | ~~**any time**, optional~~ **measured, not taken** (2026-11-06): without huge pages a node holds half as much at ready and a tenth less loaded, and its foreground's tails lose, at 6 GiB and at 1 GiB, so the default stays; at a memory its floor binds it keeps a node near its budget, which a deployment may choose ([todos](todos.md#a-nodes-huge-pages-a-deployments-choice)). Found by [Resolved #338](resolved/resident-floor-reserve.md) (2026-11-05) |
 | **Impact** | About a quarter of a gibibyte of every node's floor. mimalloc 2 on Linux defaults `allow_large_os_pages` to 2, which madvises its arenas `MADV_HUGEPAGE`, and the lab's hosts run THP `madvise` with khugepaged's `max_ptes_none` at 511, so a 2 MiB page is resident once any byte of it is touched and a free inside it returns nothing. On europa's loopback cluster each tmdb node held 410 to 436 MiB at ready as deployed and 149 to 157 MiB with `MIMALLOC_ALLOW_LARGE_OS_PAGES=0`, and 1,145 to 1,181 MiB against 929 to 969 MiB at rest after 100,000 movies. Europa's tmdb node held 1.82 GiB of its 1.85 resident in huge pages. jemalloc, which madvises nothing, held what mimalloc held without them |
 | **Difficulty** | Easy: `Environment=MIMALLOC_ALLOW_LARGE_OS_PAGES=0` in every unit shoaladm renders, beside item 353's `MIMALLOC_PURGE_DELAY` (`shoaladm/src/deploy/unit.rs`), and its test |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | A huge page covers 512 small ones in one TLB entry, so a node whose rows, maps and indexes are spread over gigabytes may take more TLB misses on its foreground. A node's memory budget is judged on its resident set ([Resolved #149](resolved/node-memory-budget.md)), so the quarter gibibyte goes to rows instead |
 | **Benchmark** | A before and after on the lab, four rounds or more at the cell's mixture (`shoaladm bench run`, rw50 and read100), the units' environment the only difference, each member's resident set and rows kept in the capture beside the ops and the get p99, and the nodes at a `node_memory` their floor binds as well as at 4 GiB |
+
+**Measured** (2026-11-06) on the `m23` side cluster, the cell alone (`CELL_ONLY`,
+`shoal-spike-scan/results/found-o157/`): O158's build (`1b7e21cb`) both sides, side B's nodes started
+with `MIMALLOC_ALLOW_LARGE_OS_PAGES=0` through a drop-in on their unit, read back from each node's
+environment; eight side-rounds in `A B B A A B B A` at 6 GiB a node, each a cluster bootstrapped fresh,
+the cell's first 100,000 rows preloaded, `rw50` and `read100` at a bundle of one, warmed 100 s and measured
+120 s. The median of four side-rounds a side, the range beside it.
+
+| At 6 GiB a node | Huge pages, as deployed | None | None / huge | Disjoint |
+| --- | --- | --- | --- | --- |
+| Resident set at ready, europa / hyperion / titan | 289 / 283 / 281 MiB | 153 / 143 / 144 MiB | 0.51 to 0.53 | yes |
+| Of it in huge pages, once loaded | 683 / 658 / 648 MiB | 0 | 0 | yes |
+| Resident set once loaded | 1,411 / 1,386 / 1,388 MiB | 1,287 / 1,264 / 1,265 MiB | 0.91 | yes |
+| `rw50` read p99 | 0.744 [0.716, 0.778] ms | 0.774 [0.766, 0.784] ms | 1.04 | no |
+| `rw50` read p999 | 2.97 [2.72, 3.07] ms | 4.29 [3.41, 6.38] ms | 1.44 | yes, worse |
+| `rw50` insert p999 | 41.2 [40.3, 42.0] ms | 43.1 [42.0, 44.8] ms | 1.05 | yes, worse |
+| `rw50` inserts a second | 1,703 [1,684, 1,717] | 1,697 [1,696, 1,701] | 1.00 | no |
+| `read100` read p99 | 0.410 [0.338, 0.453] ms | 0.394 [0.351, 0.517] ms | 0.96 | no |
+
+With O158 in, huge pages hold half a node's resident set at ready and about a tenth once it is loaded,
+and taking them away costs the foreground's tail: a read beside the cell's inserts at the p999 is 1.44
+times slower, an insert's 1.05, each disjoint. At a memory nothing binds, the default stays.
+
+At a memory the floor binds, 1 GiB a node (`shoal-spike-scan/results/found-o157f/`, four side-rounds in
+`A B B A`, so two a side and a range of two), huge pages are most of what a node holds past its budget:
+
+| At 1 GiB a node | Huge pages, as deployed | None | Disjoint |
+| --- | --- | --- | --- |
+| Resident set once loaded, europa / hyperion / titan | 1,683 / 1,020 / 1,619 MiB | 1,598 / 1,016 / 1,005 MiB | yes |
+| Of it in huge pages | 945 / 293 / 1,047 MiB | 0 | yes |
+| `rw50` read p50 | 0.346 [0.332, 0.359] ms | 0.258 [0.255, 0.260] ms | yes |
+| `rw50` read p99 | 5.67 [5.50, 5.85] ms | 5.50 [5.31, 5.68] ms | no |
+| `rw50` read p999 | 11.9 [11.9, 12.0] ms | 12.4 [12.3, 12.5] ms | yes, worse |
+| `rw50` inserts a second | 1,587 [1,575, 1,598] | 1,621 [1,615, 1,626] | yes |
+| `read100` read p99 | 0.756 [0.728, 0.783] ms | 0.818 [0.810, 0.826] ms | yes, worse |
+| `read100` read p999 | 1.17 [1.12, 1.22] ms | 1.33 [1.29, 1.36] ms | yes, worse |
+
+Titan's node held 1.62 GiB against its gibibyte with huge pages and 1.0 without, and the cell's reads
+beside its inserts were a quarter faster at the median, its inserts 2% faster. The tails still lost, a
+read alone 8% at the p99 and 13% at the p999. So a node's default keeps its huge pages: what they cost a
+node near its floor is offered as a choice its deployment may make
+([todos](todos.md#a-nodes-huge-pages-a-deployments-choice)), not taken for every node.
 
 ### O158. What openraft holds of every node's floor
 

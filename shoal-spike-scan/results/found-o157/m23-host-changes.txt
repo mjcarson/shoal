@@ -1,0 +1,14 @@
+2026-11-06T03:49:46Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-11-06T03:49:53Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-06T03:50:00Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-06T03:59:26Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T04:08:54Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T04:08:55Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T04:18:21Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T04:37:06Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T04:46:31Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T04:46:33Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T04:55:58Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T05:05:22Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-06T05:05:22Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-06T05:05:23Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started

@@ -1,0 +1,10 @@
+2026-11-06T05:05:37Z europa: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was powersave)
+2026-11-06T05:05:44Z titan: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-06T05:05:51Z hyperion: shoal-tmdb, e2scrub_all.timer, fstrim.timer, apt-daily.timer and apt-daily-upgrade.timer stopped; governor performance (was schedutil)
+2026-11-06T05:15:16Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T05:24:41Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T05:24:43Z every host: /etc/systemd/system/shoal-m23.service.d/m23-env.conf with MIMALLOC_ALLOW_LARGE_OS_PAGES=0
+2026-11-06T05:34:08Z every host: /etc/systemd/system/shoal-m23.service.d removed
+2026-11-06T05:43:28Z europa: governor powersave; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-06T05:43:29Z titan: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
+2026-11-06T05:43:30Z hyperion: governor schedutil; e2scrub_all.timer, fstrim.timer, apt-daily.timer, apt-daily-upgrade.timer and shoal-tmdb started
