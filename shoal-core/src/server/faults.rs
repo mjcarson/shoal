@@ -1216,6 +1216,47 @@ pub fn tombstones_swept() -> u64 {
     TOMBSTONES_SWEPT.load(Ordering::Relaxed)
 }
 
+/// The partitions every evictable marking was handed, the partitions its steps marked, the
+/// markings and the steps, process wide (O159)
+static MARKINGS: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Count a compacted segment's marking as a shard is handed it, before its first step
+///
+/// # Arguments
+///
+/// * `partitions` - How many partitions it names
+pub fn count_marking(partitions: usize) {
+    MARKINGS[0].fetch_add(partitions as u64, Ordering::Relaxed);
+    MARKINGS[2].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one step of a marking, which a test of the steps a large segment takes waits on (O159)
+///
+/// # Arguments
+///
+/// * `partitions` - How many partitions the step marked
+pub fn count_marking_step(partitions: usize) {
+    MARKINGS[1].fetch_add(partitions as u64, Ordering::Relaxed);
+    MARKINGS[3].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The partitions markings were handed and their steps marked, and the markings and steps, since
+/// the process started
+#[must_use]
+pub fn markings() -> (u64, u64, u64, u64) {
+    (
+        MARKINGS[0].load(Ordering::Relaxed),
+        MARKINGS[1].load(Ordering::Relaxed),
+        MARKINGS[2].load(Ordering::Relaxed),
+        MARKINGS[3].load(Ordering::Relaxed),
+    )
+}
+
 /// Whether a test holds every shard's second inbox, so its steps wait as on a loop never idle
 static IDLE_STEPS_HELD: AtomicBool = AtomicBool::new(false);
 

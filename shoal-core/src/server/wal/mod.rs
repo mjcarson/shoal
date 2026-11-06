@@ -1076,7 +1076,7 @@ impl Retries {
     }
 
     /// The bytes of a sidecar file: the magic, a checksum, then the entries
-    fn encode(&self) -> io::Result<Vec<u8>> {
+    pub(crate) fn encode(&self) -> io::Result<Vec<u8>> {
         let payload = postcard::to_allocvec(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // the magic says a checksum follows, and the checksum says what the payload has to be
@@ -1113,6 +1113,19 @@ impl Retries {
     /// * `dir` - The WAL directory
     pub async fn stage(&self, dir: &Path) -> io::Result<()> {
         write_atomic(dir, RETRIES_NEXT_FILE, self.encode()?).await
+    }
+
+    /// Stage a sidecar file's bytes, encoded already, for a checkpoint about to be written
+    ///
+    /// A checkpoint write encodes its sidecar a group at a time with [`RetriesEncoder`], so the
+    /// bytes it stages are made before it is called (O159).
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    /// * `bytes` - The file's bytes, as [`RetriesEncoder::finish`] made them
+    pub async fn stage_encoded(dir: &Path, bytes: Vec<u8>) -> io::Result<()> {
+        write_atomic(dir, RETRIES_NEXT_FILE, bytes).await
     }
 
     /// Make the staged sidecar the one, once the checkpoint it describes has landed
@@ -1185,6 +1198,78 @@ impl Retries {
             .get(&group.to_string())
             .filter(|retries| retries.retries_at == point.retries_at)
             .map(|retries| retries.placement.clone())
+    }
+}
+
+/// A retry sidecar file's bytes, encoded a group at a time
+///
+/// A sidecar holds up to 4,096 identities for every persistent group of its shard, about 2.4 MB a
+/// shard on the lab's nodes, and encoded whole it held its shard's thread for about 6 ms on a Zen1
+/// host at every compacted segment (O159). postcard writes a struct of one field as that field and
+/// a map as its length and then each key and value in turn, so a group at a time writes exactly the
+/// bytes [`Retries`]'s own encoding does, which `the_sidecar_encoded_in_steps_is_the_sidecar_encoded_whole`
+/// holds; the payload is written after room for its checksum, so it is never copied to make the file.
+pub struct RetriesEncoder<'a> {
+    /// The groups still to encode, in the map's order
+    groups: std::collections::btree_map::Iter<'a, String, GroupRetries>,
+    /// The file so far: the magic, room for the checksum, then the payload
+    bytes: Vec<u8>,
+}
+
+impl<'a> RetriesEncoder<'a> {
+    /// Start a sidecar's bytes: the magic, room for the checksum, and the map's length
+    ///
+    /// # Arguments
+    ///
+    /// * `retries` - The sidecar to encode
+    /// * `capacity` - The bytes to make room for at once, a guess at the file's length
+    ///
+    /// # Errors
+    ///
+    /// Fails if postcard cannot encode the map's length, which it always can.
+    pub fn new(retries: &'a Retries, capacity: usize) -> io::Result<Self> {
+        // the magic says a checksum follows, and the checksum is known once the payload is whole
+        let mut bytes = Vec::with_capacity(16 + capacity);
+        bytes.extend_from_slice(RETRIES_MAGIC);
+        bytes.extend_from_slice(&[0; 8]);
+        // the map's length, as postcard writes it ahead of a map's entries
+        let bytes = postcard::to_extend(&retries.groups.len(), bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(RetriesEncoder {
+            groups: retries.groups.iter(),
+            bytes,
+        })
+    }
+
+    /// Encode the next group, returning whether there was one
+    ///
+    /// # Errors
+    ///
+    /// Fails if postcard cannot encode the group, which it always can.
+    pub fn step(&mut self) -> io::Result<bool> {
+        // nothing left to encode
+        let Some(group) = self.groups.next() else {
+            return Ok(false);
+        };
+        // its key and then its value, as postcard writes a map's entry
+        let bytes = std::mem::take(&mut self.bytes);
+        self.bytes = postcard::to_extend(&group, bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(true)
+    }
+
+    /// The file's bytes, every group encoded and its checksum filled in
+    ///
+    /// # Errors
+    ///
+    /// Fails if a group left to encode cannot be, which it always can.
+    pub fn finish(mut self) -> io::Result<Vec<u8>> {
+        // any group not encoded yet
+        while self.step()? {}
+        // the checksum over the payload, in the room left for it
+        let checksum = checksum_of(&self.bytes[16..]);
+        self.bytes[8..16].copy_from_slice(&checksum.to_le_bytes());
+        Ok(self.bytes)
     }
 }
 

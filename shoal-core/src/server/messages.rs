@@ -1139,6 +1139,10 @@ where
         version: u64,
         /// Whether it landed
         outcome: Result<(), String>,
+        /// How long each step of its capture and encoding held the shard's thread, for an
+        /// attribution build's loop profile (O159)
+        #[cfg(feature = "loop-profile")]
+        steps: Vec<std::time::Duration>,
     },
     /// Report what this shard's tablet groups look like, for readiness and the fixture
     ReplicationView(std::sync::mpsc::Sender<crate::server::replication::report::ShardReplication>),

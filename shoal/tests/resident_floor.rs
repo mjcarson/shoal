@@ -8,7 +8,8 @@
 //! and stay over, its foreground reading back from disk what it had just evicted. These rows put a
 //! node in process past its floor by moving its memory under it through
 //! `faults::override_node_memory`, which is process wide, so they run in a binary of their own,
-//! one at a time.
+//! one at a time. A compacted segment's evictable marking, which reads a process wide count of
+//! its steps, runs here for the same reason (O159).
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -290,5 +291,52 @@ async fn a_node_whose_floor_leaves_its_rows_nothing_refuses_to_start() -> Result
         message.contains("node_memory") && message.contains("resident"),
         "the refusal did not name the setting and the resident set: {message}"
     );
+    Ok(())
+}
+
+/// A compacted segment holding more partitions than one step marks is marked whole, a step at a time
+///
+/// O159: a segment of the cell's held about 8,800 partitions, and marked in one message they held
+/// a Zen1 shard's loop about 4 ms. A marking now takes 256 partitions a step, the rest from the
+/// loop's second inbox between its messages. Ten thousand blobs of a kibibyte written through an
+/// intent log of a mebibyte compact about a thousand partitions to a segment: every partition a
+/// marking was handed is marked, and the markings took more steps than there were markings.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compacted_segment_past_a_step_is_marked_whole() -> Result<(), TestError> {
+    let _turn = turn();
+    let temp_dir = utils::test_dir();
+    // segments of about a thousand blobs each
+    let mut conf = conf(&temp_dir);
+    conf.storage.default.filesystem.latency_sensitive.intent_log_size = 1 << 20;
+    let (client, pool) = utils::start_with_conf::<FloorDb>(conf).await?;
+    let before = faults::markings();
+    // every blob its own partition, written as a node holding rows writes them
+    let keys: Vec<u64> = (0..ROWS).collect();
+    for chunk in keys.chunks(500) {
+        let mut bundle = client.query();
+        for key in chunk {
+            bundle = bundle.add(blob(*key));
+        }
+        let mut answers = client.send(bundle).await?;
+        while let Some(answer) = answers.next().await? {
+            assert!(answer.error().is_none(), "a write failed");
+        }
+    }
+    // until most segments are compacted and every partition their markings named is marked
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let now = faults::markings();
+        let (handed, marked, markings, steps) =
+            (now.0 - before.0, now.1 - before.1, now.2 - before.2, now.3 - before.3);
+        if handed >= ROWS / 2 && marked == handed && steps > markings {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the markings were handed {handed} partitions and marked {marked}, in {markings} markings of {steps} steps"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    pool.exit()?;
     Ok(())
 }

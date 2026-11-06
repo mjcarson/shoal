@@ -63,8 +63,8 @@ use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::storage::fs::TabletUsage;
 use crate::server::tables::ApplyStep;
 use crate::server::wal::{
-    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal, Vote,
-    WalLogId,
+    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, RetriesEncoder,
+    ShardWal, Vote, WalLogId,
 };
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
@@ -551,10 +551,12 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) tablets: HashMap<(TableId, u16), GroupId>,
     /// Apply batches stopped on a partition read, by the table and partition they wait on
     pub(super) parked: HashMap<(D::TableNames, u64), Vec<ParkedApply>>,
-    /// The checkpoint file as it was last written or read
-    pub(super) checkpoint: Checkpoint,
-    /// The retry sidecar as it was last written or read
-    pub(super) retries: Retries,
+    /// The checkpoint file and its retry sidecar as the last write captured them, or the open
+    /// read them
+    ///
+    /// Shared with a write's task, which captures them a group at a time and puts them here once
+    /// its capture is whole, before it writes them (O159); never borrowed across an await.
+    pub(super) kept: Rc<RefCell<KeptCheckpoint>>,
     /// Which write of the checkpoint file is the latest
     pub(super) checkpoint_version: u64,
     /// Whether a checkpoint write is in flight
@@ -792,8 +794,10 @@ where
             groups: BTreeMap::new(),
             tablets: HashMap::new(),
             parked: HashMap::new(),
-            checkpoint,
-            retries,
+            kept: Rc::new(RefCell::new(KeptCheckpoint {
+                checkpoint: Rc::new(checkpoint),
+                retries: Rc::new(retries),
+            })),
             checkpoint_version: 0,
             checkpoint_writing: false,
             checkpoint_dirty: false,
@@ -1003,18 +1007,21 @@ where
             .batch_bytes(cluster.replication.append_batch_bytes);
             // the checkpoint the group starts from, if its table's archives hold one, and the
             // retry table as of it, which the log above the checkpoint cannot rebuild
-            let (checkpoint, membership, seed, placement) = match replication.checkpoint.get(spec.id) {
-                Some(point) if store.is_volatile() => {
-                    let _ = point;
-                    (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default()))
+            let (checkpoint, membership, seed, placement) = {
+                let kept = replication.kept.borrow();
+                match kept.checkpoint.get(spec.id) {
+                    Some(point) if store.is_volatile() => {
+                        let _ = point;
+                        (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default()))
+                    }
+                    Some(point) => (
+                        point.applied.clone(),
+                        point.membership(),
+                        kept.retries.seed_for(spec.id, point),
+                        kept.retries.placement_for(spec.id, point),
+                    ),
+                    None => (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default())),
                 }
-                Some(point) => (
-                    point.applied.clone(),
-                    point.membership(),
-                    replication.retries.seed_for(spec.id, point),
-                    replication.retries.placement_for(spec.id, point),
-                ),
-                None => (None, StoredMembership::default(), Vec::new(), Some(PlacementState::default())),
             };
             // a durable log with a hole in it lost a segment: a replay over the hole applies
             // the entries around it and not the ones in it. One wholly at or below the
@@ -1094,6 +1101,8 @@ where
             // what the checkpoint says this copy had forgotten
             // ([F45](../../../../docs/src/features/replica-migration.md))
             machine_state.expired_before = replication
+                .kept
+                .borrow()
                 .checkpoint
                 .get(spec.id)
                 .map_or(0, |point| point.expired_before);
@@ -1232,15 +1241,18 @@ where
                 state.expired_before,
             )
         };
-        let (seed, placement) = match checkpoint
-            .as_ref()
-            .and_then(|point| replication.checkpoint.get(group).map(|file| (point, file)))
-        {
-            Some((point, file)) if file.applied.as_ref() == Some(point) => (
-                replication.retries.seed_for(group, file),
-                replication.retries.placement_for(group, file),
-            ),
-            _ => (Vec::new(), None),
+        let (seed, placement) = {
+            let kept = replication.kept.borrow();
+            match checkpoint
+                .as_ref()
+                .and_then(|point| kept.checkpoint.get(group).map(|file| (point, file)))
+            {
+                Some((point, file)) if file.applied.as_ref() == Some(point) => (
+                    kept.retries.seed_for(group, file),
+                    kept.retries.placement_for(group, file),
+                ),
+                _ => (Vec::new(), None),
+            }
         };
         let mut machine_state = MachineState::at(checkpoint.clone(), membership, seed);
         // the file pending past the checkpoint carries its own placement state, which its
@@ -1562,6 +1574,8 @@ where
                     }
                 } else {
                     let checkpoint = replication
+                        .kept
+                        .borrow()
                         .checkpoint
                         .get(group)
                         .and_then(|point| point.applied.clone());
@@ -3387,6 +3401,45 @@ where
         self.advance_in_order(generation, table);
     }
 
+    /// Mark a chunk of a compacted segment's partitions evictable, and queue the rest a chunk a
+    /// step of the second inbox
+    ///
+    /// A segment of the cell's held about 8,800 partitions, and marked in one message they held a
+    /// Zen1 shard's loop about 4 ms (O159). A chunk is [`super::idle::MARK_STEP`] partitions, so a
+    /// small segment is marked at once and a large one between the loop's messages. Each partition
+    /// is judged evictable against the generation when its step runs, as one marked a message later
+    /// always was, so a partition written again meanwhile is left resident.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the partitions belong to
+    /// * `generation` - The newest generation compacted
+    /// * `partitions` - The partitions still to mark
+    pub(super) fn mark_evictable_step(
+        &mut self,
+        table: D::TableNames,
+        generation: u64,
+        mut partitions: Vec<u64>,
+    ) {
+        // the chunk this step marks, and the rest for a later one
+        let rest = if partitions.len() > super::idle::MARK_STEP {
+            partitions.split_off(super::idle::MARK_STEP)
+        } else {
+            Vec::new()
+        };
+        // counted for a test of the steps a large segment takes
+        crate::server::faults::count_marking_step(partitions.len());
+        self.tables.mark_evictable(table, generation, partitions);
+        // the rest wait behind whatever the second inbox already holds
+        if !rest.is_empty() {
+            self.idle.push(super::idle::IdleStep::MarkEvictable {
+                table,
+                generation,
+                partitions: rest,
+            });
+        }
+    }
+
     /// Move a table's checkpoints for a segment it is done with, once it is done with every one before it
     ///
     /// The shard learns a table is done with a segment from its compactor, or at the hand-off
@@ -3508,7 +3561,8 @@ where
         }
     }
 
-    /// Stage the retry sidecar, write the checkpoint file and promote the sidecar, on a task of its own
+    /// Capture every persistent group's checkpoint and retry entries, stage the retry sidecar, write
+    /// the checkpoint file and promote the sidecar, on a task of its own
     ///
     /// The staged sidecar goes first and replaces `retries.bin` only once the checkpoint file
     /// landed: a crash before the checkpoint leaves `retries.bin` describing the checkpoint on
@@ -3518,6 +3572,14 @@ where
     /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
     /// The checkpoint counts as durable once the checkpoint file landed and its sidecar was
     /// promoted, which is when the loop hears of it.
+    ///
+    /// The capture and the sidecar's encoding are the task's, a group a step with the loop let
+    /// run between, since a write takes up to 4,096 identities of every group: taken whole on the
+    /// loop, with the encoding inside the message by `spawn_local`'s first poll, they held a Zen1
+    /// shard's loop 16 ms at every compacted segment (O159). A group's checkpoint and its entries
+    /// are read in one borrow, so each pair in the file is one moment's; a move after the write
+    /// began marks the checkpoint dirty, so no group is called durable until a write that began
+    /// after it lands.
     ///
     /// Returns whether a write was started now; if not, a dirty checkpoint is written by the
     /// next write, which is the version after the one in flight.
@@ -3532,70 +3594,69 @@ where
         replication.checkpoint_dirty = false;
         replication.checkpoint_version += 1;
         let version = replication.checkpoint_version;
-        // what every persistent group says its checkpoint is, and what it remembers as of it
-        #[cfg(feature = "loop-profile")]
-        let (started, mut entries_captured) = (std::time::Instant::now(), 0_u64);
-        let mut file = Checkpoint::default();
-        let mut retries = Retries::default();
-        for (id, slot) in &replication.groups {
-            if slot.store.is_volatile() {
-                continue;
-            }
-            let state = slot.state.borrow();
-            if let Some(applied) = &state.checkpoint {
-                // the entries at or below the checkpoint; the rest the log replay re-derives
-                let entries = state.remembered_through(applied.index);
-                #[cfg(feature = "loop-profile")]
-                {
-                    entries_captured += entries.len() as u64;
-                }
-                retries.groups.insert(
-                    id.to_string(),
-                    GroupRetries {
-                        retries_at: applied.index,
-                        entries,
-                        // the placement state as of the checkpoint, never the applied position's
-                        placement: state.placement_history.base.clone(),
-                    },
-                );
-                file.groups.insert(
-                    id.to_string(),
-                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
-                        .retries(applied.index, state.retry_floor())
-                        .expired_before(state.expired_before),
-                );
-            }
-        }
-        #[cfg(feature = "loop-profile")]
-        let started = {
-            self.loop_profile.count("checkpoint:capture", started.elapsed());
-            self.loop_profile.count_value("count:checkpoint-groups", file.groups.len() as u64);
-            self.loop_profile.count_value("count:checkpoint-entries", entries_captured);
-            std::time::Instant::now()
-        };
-        replication.checkpoint = file.clone();
-        replication.retries = retries.clone();
-        #[cfg(feature = "loop-profile")]
-        self.loop_profile.count("checkpoint:keep", started.elapsed());
+        // every persistent group's state, read a group at a time by the write's task
+        let sources: Vec<(String, Rc<RefCell<MachineState>>)> = replication
+            .groups
+            .iter()
+            .filter(|(_, slot)| !slot.store.is_volatile())
+            .map(|(id, slot)| (id.to_string(), slot.state.clone()))
+            .collect();
+        let kept = replication.kept.clone();
         let dir = replication.wal.dir();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            // the sidecar staged, then the checkpoint that names it, then the sidecar promoted
-            let outcome = match retries.stage(&dir).await {
-                Ok(()) => {
-                    // the fixture's point between the staged sidecar and the checkpoint
-                    crash_point::hit(CrashPoint::SidecarWritten);
-                    match file.write(&dir).await {
-                        Ok(()) => Retries::promote(&dir).await.map_err(|error| {
-                            format!("the retry sidecar could not be promoted: {error}")
-                        }),
-                        Err(error) => Err(error.to_string()),
+            // `spawn_local` polls a task before it returns, inside the message that began the
+            // write, so nothing is taken until the loop has gone on
+            glommio::executor().yield_now().await;
+            // each step's time, for an attribution build's loop profile
+            #[cfg(feature = "loop-profile")]
+            let mut steps = Vec::new();
+            // what every persistent group says its checkpoint is, and what it remembers as of it
+            let (file, retries, entries) = capture_checkpoints(
+                sources,
+                #[cfg(feature = "loop-profile")]
+                &mut steps,
+            )
+            .await;
+            let (file, retries) = (Rc::new(file), Rc::new(retries));
+            // the capture whole is what a group started from now reads, as it was before the
+            // write is on disk
+            *kept.borrow_mut() = KeptCheckpoint {
+                checkpoint: file.clone(),
+                retries: retries.clone(),
+            };
+            // the sidecar's bytes, a group a step, then staged, the checkpoint that names it
+            // written, and the sidecar promoted
+            let outcome = match encode_sidecar(
+                &retries,
+                entries,
+                #[cfg(feature = "loop-profile")]
+                &mut steps,
+            )
+            .await
+            {
+                Ok(bytes) => match Retries::stage_encoded(&dir, bytes).await {
+                    Ok(()) => {
+                        // the fixture's point between the staged sidecar and the checkpoint
+                        crash_point::hit(CrashPoint::SidecarWritten);
+                        match file.write(&dir).await {
+                            Ok(()) => Retries::promote(&dir).await.map_err(|error| {
+                                format!("the retry sidecar could not be promoted: {error}")
+                            }),
+                            Err(error) => Err(error.to_string()),
+                        }
                     }
-                }
-                Err(error) => Err(format!("the retry sidecar could not be staged: {error}")),
+                    Err(error) => Err(format!("the retry sidecar could not be staged: {error}")),
+                },
+                Err(error) => Err(format!("the retry sidecar could not be encoded: {error}")),
             };
             let _ = tx
-                .send(ServerMsg::CheckpointWritten { version, outcome })
+                .send(ServerMsg::CheckpointWritten {
+                    version,
+                    outcome,
+                    #[cfg(feature = "loop-profile")]
+                    steps,
+                })
                 .await;
         })
         .detach();
@@ -3612,7 +3673,13 @@ where
         &mut self,
         version: u64,
         outcome: Result<(), String>,
+        #[cfg(feature = "loop-profile")] steps: Vec<Duration>,
     ) -> Result<(), ServerError> {
+        // each step the write's task took on this shard's thread, in an attribution build (O159)
+        #[cfg(feature = "loop-profile")]
+        for step in steps {
+            self.loop_profile.count("checkpoint:step", step);
+        }
         let Some(replication) = self.replication.as_mut() else {
             return Ok(());
         };
@@ -5953,4 +6020,103 @@ mod tests {
             assert_eq!(config.enable_pre_vote, Some(true), "base {base}");
         }
     }
+}
+
+
+/// The checkpoint file and its retry sidecar as a write captured them, or the open read them
+pub(super) struct KeptCheckpoint {
+    /// The checkpoint file
+    pub(super) checkpoint: Rc<Checkpoint>,
+    /// The retry sidecar
+    pub(super) retries: Rc<Retries>,
+}
+
+/// Every persistent group's checkpoint and the retry entries as of it, a group a step with the
+/// loop let run between (O159)
+///
+/// Returns the checkpoint file, the sidecar and how many entries the sidecar holds.
+///
+/// # Arguments
+///
+/// * `sources` - Each group's identity, as the files name it, and its state
+/// * `steps` - Where each step's time goes, in an attribution build
+async fn capture_checkpoints(
+    sources: Vec<(String, Rc<RefCell<MachineState>>)>,
+    #[cfg(feature = "loop-profile")] steps: &mut Vec<Duration>,
+) -> (Checkpoint, Retries, usize) {
+    let mut file = Checkpoint::default();
+    let mut retries = Retries::default();
+    let mut entries_total = 0;
+    for (id, state) in sources {
+        // a group the loop has borrowed at this moment is read once it has not; no borrow is
+        // held across an await, here or anywhere a shard runs
+        let state = loop {
+            if let Ok(state) = state.try_borrow() {
+                break state;
+            }
+            glommio::executor().yield_now().await;
+        };
+        #[cfg(feature = "loop-profile")]
+        let started = Instant::now();
+        if let Some(applied) = &state.checkpoint {
+            // the entries at or below the checkpoint and the floor, from one walk of the table;
+            // the entries above it the log replay re-derives
+            let (entries, floor) = state.remembered_and_floor(applied.index);
+            entries_total += entries.len();
+            retries.groups.insert(
+                id.clone(),
+                GroupRetries {
+                    retries_at: applied.index,
+                    entries,
+                    // the placement state as of the checkpoint, never the applied position's
+                    placement: state.placement_history.base.clone(),
+                },
+            );
+            file.groups.insert(
+                id,
+                GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
+                    .retries(applied.index, floor)
+                    .expired_before(state.expired_before),
+            );
+        }
+        // the borrow ends before the loop runs again
+        drop(state);
+        #[cfg(feature = "loop-profile")]
+        steps.push(started.elapsed());
+        glommio::executor().yield_now().await;
+    }
+    (file, retries, entries_total)
+}
+
+/// A captured sidecar's bytes, encoded a group a step with the loop let run between (O159)
+///
+/// # Arguments
+///
+/// * `retries` - The sidecar
+/// * `entries` - How many entries it holds, which sizes its bytes at once
+/// * `steps` - Where each step's time goes, in an attribution build
+///
+/// # Errors
+///
+/// Fails if postcard cannot encode the sidecar, which it always can.
+async fn encode_sidecar(
+    retries: &Retries,
+    entries: usize,
+    #[cfg(feature = "loop-profile")] steps: &mut Vec<Duration>,
+) -> std::io::Result<Vec<u8>> {
+    // about forty bytes an entry and a few hundred a group, so the bytes are seldom moved
+    let mut encoder = RetriesEncoder::new(retries, entries * 40 + retries.groups.len() * 256)?;
+    loop {
+        #[cfg(feature = "loop-profile")]
+        let started = Instant::now();
+        // one group, then the loop
+        let more = encoder.step()?;
+        #[cfg(feature = "loop-profile")]
+        steps.push(started.elapsed());
+        if !more {
+            break;
+        }
+        glommio::executor().yield_now().await;
+    }
+    encoder.finish()
 }

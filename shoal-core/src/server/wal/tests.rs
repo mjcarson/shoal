@@ -20,8 +20,8 @@ use openraft::{
 
 use super::frame::{Entry, LeaderId, WalLogId};
 use super::{
-    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
-    CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC, RETRIES_NEXT_FILE,
+    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, RetriesEncoder,
+    ShardWal, CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC, RETRIES_NEXT_FILE,
 };
 use crate::server::control::runtime::GlommioRuntime;
 use crate::server::replication::{
@@ -1771,6 +1771,107 @@ fn an_entry_never_weighs_more_on_the_wire_than_in_the_log() {
         assert!(
             sent <= weighed,
             "an entry sent as {sent} bytes weighs {weighed} in the log"
+        );
+    }
+}
+
+/// One remembered request of a sidecar test, its digest and outcome derived from where it applied
+///
+/// # Arguments
+///
+/// * `bundle` - The bundle its identity names
+/// * `applied` - The index it applied at, which is its identity's index too
+fn sidecar_entry(bundle: u8, applied: u64) -> (RequestId, Remembered) {
+    (
+        RequestId {
+            bundle: [bundle; 16],
+            index: applied,
+        },
+        Remembered {
+            digest: applied.wrapping_mul(0x9e37_79b9),
+            result: CommandResult {
+                kind: ResultKind::Delete,
+                ok: applied % 3 != 0,
+            },
+            applied,
+        },
+    )
+}
+
+/// A sidecar encoded a group at a time is byte for byte the sidecar encoded whole
+///
+/// A checkpoint write encodes its sidecar a group at a time so its shard's loop runs between
+/// them (O159); a file whose bytes differed would be refused at a start by its checksum or read
+/// as other entries. The groups here hold none, one and thousands of entries, and keys whose
+/// lengths differ, so the map's order and every length postcard writes are exercised.
+#[test]
+fn the_sidecar_encoded_in_steps_is_the_sidecar_encoded_whole() {
+    // groups of every size, keyed as the shard keys them
+    let mut retries = Retries::default();
+    for (group, count) in [(1_u64, 0_u64), (7, 1), (0x1234_5678, 4_096), (42, 300)] {
+        retries.groups.insert(
+            GroupId(group).to_string(),
+            GroupRetries {
+                retries_at: count,
+                entries: (1..=count).map(|applied| sidecar_entry(group as u8, applied)).collect(),
+                placement: Default::default(),
+            },
+        );
+    }
+    let whole = retries.encode().expect("a sidecar encodes");
+    // encoded a group a step, as a checkpoint write does, from no room and from too much
+    for capacity in [0, whole.len() * 2] {
+        let mut encoder = RetriesEncoder::new(&retries, capacity).expect("a sidecar's start encodes");
+        let mut steps = 0;
+        while encoder.step().expect("a group encodes") {
+            steps += 1;
+        }
+        assert_eq!(steps, retries.groups.len(), "a step is one group");
+        assert_eq!(encoder.finish().expect("a sidecar finishes"), whole);
+    }
+    // and an empty sidecar is the empty sidecar's bytes
+    let empty = Retries::default();
+    assert_eq!(
+        RetriesEncoder::new(&empty, 0).and_then(RetriesEncoder::finish).expect("an empty sidecar encodes"),
+        empty.encode().expect("an empty sidecar encodes")
+    );
+}
+
+/// One walk of a retry table takes the entries through a checkpoint and the floor two walks took
+///
+/// A duplicate's apply promotes its identity in the table, so the walk's order is not the
+/// identities' applied order and the floor is not the oldest node's; the one walk must still
+/// answer what `remembered_through` and `retry_floor` do (O159).
+#[test]
+fn one_walk_takes_what_two_walks_took() {
+    let membership = StoredMembership::new(
+        Some(log_id(1, 0)),
+        openraft::Membership::new(
+            vec![members(&[1])],
+            members(&[1])
+                .into_iter()
+                .map(|addr| (addr, addr))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .expect("a valid membership"),
+    );
+    let mut state = MachineState::at(None, membership, Vec::new());
+    // nothing remembered: no entries, a floor of zero
+    assert_eq!(state.remembered_and_floor(10), (Vec::new(), 0));
+    // identities applied in order, then two old ones promoted as a duplicate's apply does
+    for applied in 1..=50 {
+        let (request, remembered) = sidecar_entry(5, applied);
+        state.remember(request, remembered);
+    }
+    for applied in [3, 17] {
+        let (request, _) = sidecar_entry(5, applied);
+        assert!(state.dedup.get(&request).is_some());
+    }
+    for through in [0, 2, 3, 17, 30, 50, 99] {
+        assert_eq!(
+            state.remembered_and_floor(through),
+            (state.remembered_through(through), state.retry_floor()),
+            "through {through}"
         );
     }
 }

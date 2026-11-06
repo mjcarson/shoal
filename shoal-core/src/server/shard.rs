@@ -3171,7 +3171,7 @@ pub(super) struct Shard<D: ShoalDatabase> {
     scan_priority: TaskQueueHandle,
     /// The loop's second inbox: steps a background read takes on the loop, run only when no
     /// message waits, or one at most every bound when messages always do (F117)
-    idle: idle::IdleSteps,
+    idle: idle::IdleSteps<D::TableNames>,
     /// What every shard of the node shares for a scan's pages: the scan budget (F118)
     scans: Arc<crate::server::scans::ScanResources>,
     /// The tasks we have spawned
@@ -7422,6 +7422,11 @@ where
                 match step {
                     idle::IdleStep::Capture(queued) => self.capture_queued(*queued),
                     idle::IdleStep::Encode(ask) => self.encode_step(*ask),
+                    idle::IdleStep::MarkEvictable {
+                        table,
+                        generation,
+                        partitions,
+                    } => self.mark_evictable_step(table, generation, partitions),
                 }
                 self.idle.ran(started.elapsed(), forced, std::time::Instant::now());
                 glommio::yield_if_needed().await;
@@ -7627,7 +7632,9 @@ where
                     #[cfg(feature = "loop-profile")]
                     self.loop_profile
                         .count_value("count:evictable-partitions", partitions.len() as u64);
-                    self.tables.mark_evictable(table, generation, partitions);
+                    // a chunk now and the rest a chunk a step of the second inbox
+                    crate::server::faults::count_marking(partitions.len());
+                    self.mark_evictable_step(table, generation, partitions);
                 }
                 // a bundle forwarded by another node, which this shard accepted and now routes
                 ServerMsg::Forward {
@@ -7887,8 +7894,18 @@ where
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }
                 ServerMsg::BulkLaneEnded { node } => self.handle_bulk_lane_ended(node),
-                ServerMsg::CheckpointWritten { version, outcome } => {
-                    self.handle_checkpoint_written(version, outcome)?;
+                ServerMsg::CheckpointWritten {
+                    version,
+                    outcome,
+                    #[cfg(feature = "loop-profile")]
+                    steps,
+                } => {
+                    self.handle_checkpoint_written(
+                        version,
+                        outcome,
+                        #[cfg(feature = "loop-profile")]
+                        steps,
+                    )?;
                 }
                 // report what this shard's groups look like
                 ServerMsg::ReplicationView(reply) => {
@@ -7926,6 +7943,8 @@ where
                             idle::IdleStep::Capture(queued) => self.refuse_queued(*queued),
                             // a dropped ask fails its page, which a stopping shard refuses anyway
                             idle::IdleStep::Encode(ask) => drop(ask),
+                            // a stopping shard evicts nothing, so its marking is left
+                            idle::IdleStep::MarkEvictable { .. } => (),
                         }
                     }
                     // the tablet groups stop first, on a task that posts back when they are

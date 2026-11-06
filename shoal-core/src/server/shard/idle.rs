@@ -2,7 +2,8 @@
 //! nothing else to do ([F117](../../../../docs/src/features/scan-class.md))
 //!
 //! Some of a background read has to run on the loop, since the partitions it reads belong to it: a
-//! scan page's plan, and since M23 the encoding of each partition it planned, a step each. Those steps wait
+//! scan page's plan, and since M23 the encoding of each partition it planned, a step each. Since
+//! O159 a compacted segment's evictable marking waits here too, past its first chunk. Those steps wait
 //! here rather than in the main inbox, and the loop takes one only once no message is waiting, so
 //! no query queued before a step waits behind it. A shard whose inbox is never empty would starve
 //! them, so a step also runs ahead of a waiting message once one is due: no sooner than
@@ -29,27 +30,45 @@ pub const FORCED_EVERY: Duration = Duration::from_millis(10);
 /// take at most one part in this many of a loop that is never idle
 pub const FORCED_DUTY: u32 = 50;
 
+/// How many of a compacted segment's partitions one step marks evictable
+///
+/// A partition took about 440 ns to mark on a Zen1 host, and a segment of the cell's held about
+/// 8,800 of them, so marked in one message it held the loop about 4 ms (O159): 256 hold it about
+/// 110 µs, near the scan queue's 100 µs goal.
+pub const MARK_STEP: usize = 256;
+
 /// One step a background read takes on the loop
+///
+/// Generic over the schema's table names, which a marking step carries.
 #[derive(Debug)]
-pub enum IdleStep {
+pub enum IdleStep<T> {
     /// A scan page's capture, admitted and waiting for the loop to be idle
     Capture(Box<QueuedCapture>),
     /// A planned scan page's partition, encoded over a fresh lookup of its key (M23)
     Encode(Box<crate::server::tables::walk::EncodeAsk>),
+    /// The rest of a compacted segment's partitions to mark evictable, [`MARK_STEP`] a step (O159)
+    MarkEvictable {
+        /// The table they belong to
+        table: T,
+        /// The newest generation compacted
+        generation: u64,
+        /// The partitions still to mark
+        partitions: Vec<u64>,
+    },
 }
 
 /// The steps waiting for the loop, and when one may next run ahead of a waiting message
 #[derive(Debug)]
-pub struct IdleSteps {
+pub struct IdleSteps<T> {
     /// The steps, in the order they were queued
-    steps: VecDeque<IdleStep>,
+    steps: VecDeque<IdleStep<T>>,
     /// When the last step run ahead of a waiting message ended
     last_forced: Instant,
     /// How long that step held the loop
     last_held: Duration,
 }
 
-impl Default for IdleSteps {
+impl<T> Default for IdleSteps<T> {
     /// No step waiting, and the first forced step due a bound from now
     fn default() -> Self {
         IdleSteps {
@@ -60,7 +79,7 @@ impl Default for IdleSteps {
     }
 }
 
-impl IdleSteps {
+impl<T> IdleSteps<T> {
     /// Whether no step waits, which is all the loop asks while it is empty: one length check
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -72,7 +91,7 @@ impl IdleSteps {
     /// # Arguments
     ///
     /// * `step` - The step
-    pub fn push(&mut self, step: IdleStep) {
+    pub fn push(&mut self, step: IdleStep<T>) {
         self.steps.push_back(step);
     }
 
@@ -84,12 +103,12 @@ impl IdleSteps {
     }
 
     /// Take the step that waited longest
-    pub fn pop(&mut self) -> Option<IdleStep> {
+    pub fn pop(&mut self) -> Option<IdleStep<T>> {
         self.steps.pop_front()
     }
 
     /// Take every waiting step, for a shard that is stopping to refuse
-    pub fn drain(&mut self) -> impl Iterator<Item = IdleStep> + '_ {
+    pub fn drain(&mut self) -> impl Iterator<Item = IdleStep<T>> + '_ {
         self.steps.drain(..)
     }
 
@@ -131,7 +150,7 @@ mod tests {
     #[test]
     fn an_idle_step_runs_ahead_of_a_queued_message_only_when_due() {
         // the queue's own clock starts when it is made, so the test's starts after
-        let mut idle = IdleSteps::default();
+        let mut idle = IdleSteps::<()>::default();
         let start = Instant::now();
         // a fresh shard waits a bound before its first forced step
         assert!(!idle.forced_due(start));

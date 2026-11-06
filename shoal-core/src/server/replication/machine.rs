@@ -574,6 +574,36 @@ impl MachineState {
             .collect()
     }
 
+    /// The remembered requests applied at or below an index, oldest first, and the retry floor,
+    /// both from one walk of the table
+    ///
+    /// What a checkpoint write captures of a group: [`Self::remembered_through`] and
+    /// [`Self::retry_floor`] each walk every identity the table holds, a heap node each, and a
+    /// write took both for every group on its shard's thread, two walks of up to 4,096 nodes a
+    /// group (O159). The floor is the lowest applied index of every identity, not only those at
+    /// or below the index, as [`Self::retry_floor`]'s is.
+    ///
+    /// # Arguments
+    ///
+    /// * `through` - The index the checkpoint stands at
+    #[must_use]
+    pub fn remembered_and_floor(&self, through: u64) -> (Vec<(RequestId, Remembered)>, u64) {
+        // room for every identity, so the vector never grows while the table is walked
+        let mut entries = Vec::with_capacity(self.dedup.len());
+        let mut floor = u64::MAX;
+        // the cache iterates newest first, and the sidecar is written oldest first
+        for (request, remembered) in self.dedup.iter().rev() {
+            // every identity counts toward the floor
+            floor = floor.min(remembered.applied);
+            // and only those at or below the index are the checkpoint's
+            if remembered.applied <= through {
+                entries.push((*request, *remembered));
+            }
+        }
+        // a table that remembers nothing has a floor of zero, as retry_floor says
+        (entries, if floor == u64::MAX { 0 } else { floor })
+    }
+
     /// The lowest applied index still remembered, or zero when nothing is
     ///
     /// The low-water mark: an identity applied below it has been forgotten, and a retry of it
