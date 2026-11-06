@@ -529,6 +529,40 @@ sits parked, which is a span between events rather than a function duration.
 The workspace also has `cargo-flamegraph` available, and a `profile.json.gz` and
 `shoal_looper.sh` at the repo root suggest ad-hoc profiling workflows that are not documented.
 
+## The loop profile
+
+What held a shard's loop, and how long what waited for it waited: an attribution build, behind
+`shoal-core`'s `loop-profile` feature (`shoal`'s and `shoal-spike-scan`'s forward it), never a default,
+so a product build pays nothing for it
+([O140](../appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)).
+
+```bash
+cargo build --release -p shoal-spike-scan --features loop-profile   # the m23 side cluster's node
+```
+
+- **A mark at every turn of the loop.** The loop marks the clock after each message, named by its
+  kind (`message:SegmentCompacted`, `message:Client`, ...), and after each of the things it does
+  between messages: its yield to its executor's other tasks (`loop:yield`), its second inbox's steps,
+  its wait for a message (`loop:waiting`), its segment sweep, its tables' flush and its memory check. The time since the last mark is counted
+  against what just ran, a log2 histogram of microseconds a kind (`server/loop_profile.rs`), so the
+  kinds sum to the loop's whole time.
+- **The waits.** A client's bundle is counted from its last byte off the socket to its taking
+  (`wait:client`), and a routed query from its routing (`wait:query`).
+- **Parts of a hold** where one hold is worth splitting: since
+  [O159](../appendix/optimizations.md#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)
+  a compacted segment's parts (`compacted:*`), each step a checkpoint write's task takes
+  (`checkpoint:step`), and the sizes beside them, a `count:` kind whose figures are counts rather than
+  microseconds.
+- **Where it is read.** Each shard's figures ride its replication report and a node's `NodeStats`
+  (`loop_profile`, absent without the feature), so `stats --json --watch 1` against a cluster keeps a
+  second-by-second record. `shoal-spike-scan/results/loop-profile-report.py` takes the change over each
+  arm's measured window, member by member: each kind's count, mean, p99 and share of the window.
+
+A message's time includes whatever the executor ran while the loop awaited inside it, and a spawned
+task's polls between messages are counted as `loop:yield`, so a task that holds the thread shows there
+and not under the message that spawned it, except its first poll, which glommio's `spawn_local` runs
+before it returns.
+
 ## What is missing
 
 For running Shoal anywhere real, the gaps are:

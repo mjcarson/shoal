@@ -5217,7 +5217,7 @@ node's, nearly all of it in huge pages. Nothing the foreground does moved; every
 
 | | |
 | --- | --- |
-| **Rank** | **to build** (2026-11-05), the user deciding on O140's attribution to fix both holds and A/B them on the lab. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s attribution (2026-11-05) |
+| **Rank** | ~~**to build** (2026-11-05), the user deciding on O140's attribution to fix both holds and A/B them on the lab~~ **applied** (2026-11-06, `bdd2958c`): both holds a step of a quarter of a millisecond at most on a Zen1 shard, where they were 16 and 4 ms, measured on the lab. Found by [O140](#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts)'s attribution (2026-11-05) |
 | **Impact** | Profiled, on the lab, by `shoal-core`'s `loop-profile` build: two side-rounds of the cell alone on the `m23` side cluster (`shoal-spike-scan/results/found-o140/`). A shard's loop is idle 97 to 99% of the cell's `rw50`, and the two longest things that hold it are rare: a compacted segment (`ServerMsg::SegmentCompacted`), 15.7 to 16.1 ms at the mean and 32 ms at the p99 on the Zen1 hosts and 6.7 to 7.3 ms on europa, about 21 to 24 times a node in 120 s; and the evictable marking of its partitions (`ServerMsg::MarkEvictable`), 3.9 to 4.3 ms at the mean and 16 ms at the p99 on the Zen1 hosts. A read on that shard waits behind them, and the cell's read p999 beside its inserts is 3.3 to 4.4 ms against 0.57 to 0.61 ms with no inserts, its max 29 to 71 ms |
 | **Difficulty** | M. A segment's compaction moves the checkpoint of every group of its table, and `write_checkpoint` (`shoal-core/src/server/shard/groups.rs`) then builds the whole retry sidecar on the loop: every persistent group's remembered identities through its checkpoint, up to 4,096 a group (`remembered_through`), each walked through the retry table's `LruCache` (a heap node an identity), walked a second time for the group's floor (`retry_floor`), and the file and the sidecar cloned once more each to keep them; about 2.4 MB a shard on the lab's nodes. `mark_evictable` walks every partition the segment held in one step |
 | **Depends on** | nothing |
@@ -5247,4 +5247,40 @@ median, about 440 ns each.
   message and the rest from the loop's second inbox (`IdleStep::MarkEvictable`), each judged against the
   generation when its step runs.
 
-What the A/B shows is recorded below once run.
+**On the lab** (2026-11-06, `shoal-spike-scan/results/found-o159/`): the cell alone on the `m23` side
+cluster, eight side-rounds in `A B B A A B B A`, both sides `loop-profile` builds, side A `48173e91`
+(its holds timed by their parts) and side B `bdd2958c`. The median of four side-rounds a side, the
+range beside it.
+
+| | Side A | Side B | Disjoint |
+| --- | --- | --- | --- |
+| A compacted segment's hold, titan / hyperion, mean | 16.0 / 16.0 ms | 64 / 62 µs | yes |
+| Its p99, the Zen1 hosts | 32,768 µs's bucket | 128 to 256 µs's | yes |
+| A segment's marking's hold, titan / hyperion, mean | 4.2 / 4.3 ms | 133 / 125 µs | yes |
+| Its p99, the Zen1 hosts | 16,384 µs's bucket | 256 µs's | yes |
+| A checkpoint write's step, the Zen1 hosts, mean (p99) | none: the write was one hold | 113 to 114 µs (1,024 µs's bucket) | - |
+| A routed query's wait to be taken, titan, mean (p99) | 48 µs (256's) | 47 µs (256's) | no |
+| `rw50` read p999 | 3.63 [2.68, 4.34] ms | 2.58 [2.17, 2.81] ms | no |
+| `rw50` read p99 | 0.784 [0.753, 0.796] ms | 0.772 [0.762, 0.812] ms | no |
+| `rw50` inserts a second | 1,698 [1,690, 1,701] | 1,705 [1,697, 1,707] | no |
+| `read100` read p99 | 0.409 [0.387, 0.529] ms | 0.413 [0.359, 0.466] ms | no |
+
+The two holds are gone: the longest thing either does on a Zen1 shard's loop is a step of a quarter of
+a millisecond at most, where it was 16 and 4 ms. The cell's read p999 beside its inserts fell to 0.71 of
+side A's at the median, but the ranges overlap at four side-rounds a side, so it is not yet a result.
+With the holds gone, a routed query waits at most 256 µs at the p99 on a Zen1 shard either side, so
+what is left of the client's p999 is not the shard's loop: the longest holds left are its tick and a
+sealed segment ([O160](#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)).
+Nothing else moved.
+
+### O160. A shard's tick and a sealed segment hold a Zen1 shard's loop for up to two milliseconds
+
+| | |
+| --- | --- |
+| **Rank** | **any time**, optional, **to measure**: where the tick's time goes, before anything is changed for it. Found by [O159](#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)'s A/B (2026-11-06) |
+| **Impact** | Profiled, by `loop-profile` builds of the cell alone on the `m23` side cluster (`shoal-spike-scan/results/found-o159/`). With O159's two holds gone, the longest things holding a Zen1 shard's loop beside the cell's inserts are a peer message, 0.40 ms at the mean and in the 1,024 or 2,048 µs bucket at the p99, about ten a second, nearly all of them the loop's tick (`PeerEvent::Tick`); and a sealed segment (`ServerMsg::WalSealed`), 0.43 to 0.53 ms at the mean and 2,048 µs's bucket at the p99, about every six seconds. On europa the tick is 0.20 ms and a sealed segment 4 µs. Each is under a millisecond at the mean, so what either adds to a read's tail is small beside what O159 took away |
+| **Difficulty** | Unknown until measured. The tick sweeps the gathers and the deadlines, reports, checks the disk, balances leadership, builds deferred snapshots, and drives repairs, moves, backups, restores, scrubs, stalled copies and retired ones, each over the shard's groups, ten times a second, much of it finding nothing to do |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Work the tick does less often is noticed later: a deadline, a move or a repair waits up to the longer period |
+| **Benchmark** | The cell alone side against side (`CELL_ONLY`), `loop-profile` builds with the tick timed by its parts and the sealed segment by its own |

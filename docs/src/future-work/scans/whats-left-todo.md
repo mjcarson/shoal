@@ -366,7 +366,8 @@ flowchart LR
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
-        O159["O159 A segment's checkpoint<br>holds a shard's loop"]
+        O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
+        O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
     end
 ```
 
@@ -486,6 +487,16 @@ again, and its runtime stats about 40 MiB a node, about 0.2 GiB of a node's heap
 (2026-11-05) through forks of openraft and base2histogram the workspace patches in, and measured on the
 lab: a side cluster node's resident set at ready fell from 1.13 to 1.19 GiB to 283 to 289 MiB, and once
 loaded from 2.2 GiB to 1.38 to 1.43, the cell's foreground unmoved. Its box is green.
+[O159](../../appendix/optimizations.md#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds)
+was found by O140's attribution (2026-11-05): with item 352 fixed, the longest things holding a Zen1
+shard's loop beside the cell's inserts were a compacted segment's checkpoint write, 16 ms, and its
+evictable marking, 4 ms, about every six seconds. The user decided to fix both, and they are built
+(2026-11-06): the write's capture and encoding are its task's, a group a step, and the marking takes 256
+partitions a step from the second inbox. On the lab both holds became steps of a quarter of a millisecond
+at most, and its box is green.
+[O160](../../appendix/optimizations.md#o160-a-shards-tick-and-a-sealed-segment-hold-a-zen1-shards-loop-for-up-to-two-milliseconds)
+was found by its A/B: what holds a Zen1 shard's loop longest after it is the loop's tick, 0.4 ms ten times
+a second, and a sealed segment, 0.5 ms. It is optional, any time, and wants a measurement first.
 
 The work found on the way waits on no gate. ~~Its two defects to reproduce are recorded on
 [W1's page](prerequisites.md#found-on-the-way) and are filed once a test shows them; the rest are on
@@ -626,7 +637,8 @@ flowchart TB
         O156["✅ O156 An integer sort key beside<br>a padded string (optional)"]:::done
         O157["O157 A node's heap on transparent<br>huge pages (optional)"]:::optional
         O158["✅ O158 What openraft holds of<br>every node's floor (optional)"]:::done
-        O159["O159 A segment's checkpoint<br>holds a shard's loop"]
+        O159["✅ O159 A segment's checkpoint<br>holds a shard's loop"]:::done
+        O160["O160 A shard's tick and a<br>sealed segment (optional)"]:::optional
     end
     subgraph anytime["Optional, any time"]
         direction LR
